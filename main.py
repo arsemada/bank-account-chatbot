@@ -7,7 +7,7 @@ from chromadb.config import Settings # Import Settings for persistent client
 
 # --- Configuration and Initialization ---
 
-# Load environment variables
+# Load environment variables from .env file
 load_dotenv()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
@@ -34,11 +34,15 @@ except Exception as e:
     print(f"An error occurred while setting up persistent ChromaDB: {e}")
     exit()
 
-# --- New Functions for Caching ---
+# In-memory cache for exact matches. This is a faster first-tier cache.
+# This cache will be cleared every time the script is restarted.
+EXACT_MATCH_CACHE = {}
 
-def get_cached_response(query_text, similarity_threshold=0.9):
+# --- Functions for Caching ---
+
+def get_semantic_cached_response(query_text, similarity_threshold=0.9):
     """
-    Searches the ChromaDB collection for a similar query and returns the cached response.
+    Searches the ChromaDB collection for a semantically similar query and returns the cached response.
     """
     # Search the collection for the most similar document
     results = collection.query(
@@ -46,28 +50,34 @@ def get_cached_response(query_text, similarity_threshold=0.9):
         n_results=1
     )
     
-    # Check if a result was found and if its similarity score is above the threshold
-    # ChromaDB returns distances. A smaller distance means higher similarity.
-    # The distance is typically 1 - cosine_similarity. So, a threshold of 0.9 similarity
-    # means a distance <= 0.1.
-    if results and results['ids'] and results['ids'][0]: # Check if any results were returned
-        distance = results['distances'][0][0]
-        if distance <= (1 - similarity_threshold):
-            cached_response = results['documents'][0][0]
-            print(f"DEBUG: Found cached response with distance {distance:.4f} (Similarity: {1-distance:.4f})")
-            return cached_response
-        
-    print("DEBUG: No sufficiently similar response found in cache.")
-    return None
+    if not results or not results['ids'] or not results['ids'][0]:
+        # print("DEBUG: ChromaDB query returned no semantic results.") # Optional: uncomment for more detailed debug
+        return None
+            
+    distance = results['distances'][0][0]
+    cached_document = results['documents'][0][0]
+    
+    # Check if the calculated distance is below the threshold
+    # A smaller distance means higher similarity.
+    if distance <= (1 - similarity_threshold):
+        print(f"DEBUG: Semantic cache hit! Distance: {distance:.4f} (Threshold: {(1 - similarity_threshold):.4f})")
+        return cached_document
+    else:
+        # print(f"DEBUG: Semantic cache miss. Distance {distance:.4f} is above threshold {(1 - similarity_threshold):.4f}.") # Optional: uncomment for more detailed debug
+        return None
 
 def store_response(query_text, bot_response):
     """
-    Stores a new query and its response in the ChromaDB collection.
+    Stores a new query and its response in both the in-memory exact-match cache and ChromaDB for semantic search.
     """
-    # ChromaDB requires a unique ID for each document.
-    # We'll use a simple counter based on the current number of documents in the collection.
-    # In a real-world app, you might use UUIDs or a more robust ID generation.
+    # Store in the exact-match cache (Tier 1)
+    EXACT_MATCH_CACHE[query_text] = bot_response
+    print("DEBUG: Response stored in in-memory exact match cache.")
+    
+    # Store in ChromaDB for semantic search (Tier 2)
     try:
+        # Generate a unique ID for the document in ChromaDB
+        # In a real application, consider using UUIDs for more robust unique IDs
         current_count = collection.count()
         unique_id = f"response_{current_count + 1}" 
         
@@ -94,24 +104,34 @@ def chatbot():
         if user_input.lower() in ["exit", "quit"]:
             break
         
-        # 1. Check for a cached response
-        cached_response = get_cached_response(user_input)
+        # --- Caching Logic ---
+        # Tier 1 Cache: Check for an exact match in the in-memory dictionary
+        if user_input in EXACT_MATCH_CACHE:
+            print(f"Bot (from exact cache): {EXACT_MATCH_CACHE[user_input]}")
+            continue # Skip to the next iteration of the loop, no need to hit Gemini or ChromaDB
         
-        if cached_response:
-            # 2. If a cached response is found, return it
-            print(f"Bot (from cache): {cached_response}")
+        # Tier 2 Cache: If no exact match, perform a semantic search in ChromaDB
+        semantic_cached_response = get_semantic_cached_response(user_input)
+        
+        if semantic_cached_response:
+            print(f"Bot (from semantic cache): {semantic_cached_response}")
+            # Optionally, add this to the exact cache for faster retrieval next time
+            EXACT_MATCH_CACHE[user_input] = semantic_cached_response
         else:
-            # 3. If not, call the Gemini API for a new response
+            # If no cache hit at all (neither exact nor semantic), call the Gemini API
             try:
+                print("DEBUG: Calling Gemini API for a new response...")
                 response = model.generate_content(user_input)
                 new_response = response.text
                 print(f"Bot (from Gemini): {new_response}")
                 
-                # 4. Store the new response in ChromaDB
+                # Store the new response in both caches for future use
                 store_response(user_input, new_response)
                 
             except Exception as e:
                 print(f"An error occurred while calling the Gemini API: {e}")
+                # If Gemini API fails, you might want to provide a fallback message
+                print("Bot: I'm sorry, I'm having trouble generating a response right now. Please try again later.")
 
 if __name__ == "__main__":
     chatbot()
