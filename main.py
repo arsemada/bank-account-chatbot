@@ -129,33 +129,36 @@ def chatbot():
     global conversation_state, account_details
     print("\nWelcome to the Bank Account Opening Chatbot!")
     print("You can start by asking a general question or by saying 'I want to open an account'.")
-
+    
     model = genai.GenerativeModel('gemini-1.5-flash-latest')
-
+    
     while True:
         user_input = input("You: ")
         if user_input.lower() in ["exit", "quit"]:
             break
-
+            
         # --- State Handling Logic ---
         if conversation_state != ChatState.IDLE:
             response = handle_account_opening_flow(user_input)
             print(f"Bot: {response}")
-            continue # Skip to next loop iteration
-
+            # If the flow is complete, we should now allow the loop to process the next input normally.
+            if conversation_state == ChatState.IDLE:
+                continue
+            continue
+            
         # --- Intent Recognition for general queries ---
         if "open an account" in user_input.lower() or "open a bank account" in user_input.lower():
             conversation_state = ChatState.ASK_NAME
             print("Bot: Great! To get started, what is your full name?")
-            continue # Skip to next loop iteration
-
+            continue
+            
         # --- Fallback to Caching and Gemini API for general questions ---
         if user_input in EXACT_MATCH_CACHE:
             print(f"Bot (from exact cache): {EXACT_MATCH_CACHE[user_input]}")
             continue
-
+        
         semantic_cached_response = get_semantic_cached_response(user_input)
-
+        
         if semantic_cached_response:
             print(f"Bot (from semantic cache): {semantic_cached_response}")
             EXACT_MATCH_CACHE[user_input] = semantic_cached_response
@@ -165,9 +168,9 @@ def chatbot():
                 response = model.generate_content(user_input)
                 new_response = response.text
                 print(f"Bot (from Gemini): {new_response}")
-
+                
                 store_response(user_input, new_response)
-
+                
             except Exception as e:
                 print(f"An error occurred while calling the Gemini API: {e}")
                 print("Bot: I'm sorry, I'm having trouble generating a response right now. Please try again later.")
